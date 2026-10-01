@@ -1,9 +1,9 @@
 // Command heain-access runs the standalone access-control HTTP service.
 // Stage A registers the keycard Verifier (deterministic ACL gate) and,
-// when -ocr-sidecar-url is set, the id_card Verifier (real OCR via a
-// Python sidecar). The remaining two methods (face, fingerprint,
-// DCP/KDM key issuance) are registered once their model-backed
-// implementations exist.
+// when the corresponding sidecar URL flags are set, the id_card and face
+// Verifiers (real ML via Python sidecars). The remaining two methods
+// (fingerprint, DCP/KDM key issuance) are registered once their
+// model-backed implementations exist.
 package main
 
 import (
@@ -25,6 +25,9 @@ func main() {
 	ocrSidecarURL := flag.String("ocr-sidecar-url", "",
 		"base URL of the OCR sidecar backing the id_card Verifier (e.g. http://localhost:9700); "+
 			"id_card is not registered when empty")
+	faceSidecarURL := flag.String("face-sidecar-url", "",
+		"base URL of the face-embedding sidecar backing the face Verifier (e.g. http://localhost:9701); "+
+			"face is not registered when empty")
 	flag.Parse()
 
 	reg := verifier.NewRegistry()
@@ -48,11 +51,19 @@ func main() {
 		idCardRegistered = true
 	}
 
+	faceRegistered := false
+	if *faceSidecarURL != "" {
+		if err := reg.Register(verifier.NewFaceVerifier(*faceSidecarURL)); err != nil {
+			log.Fatalf("heain-access: registering face verifier: %v", err)
+		}
+		faceRegistered = true
+	}
+
 	st := store.NewInMemoryStore()
 	srv := httpapi.NewServer(reg, st)
 
-	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v)",
-		*listenAddr, len(uids), idCardRegistered)
+	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v)",
+		*listenAddr, len(uids), idCardRegistered, faceRegistered)
 	if err := http.ListenAndServe(*listenAddr, srv.Routes()); err != nil {
 		log.Fatalf("heain-access: %v", err)
 	}

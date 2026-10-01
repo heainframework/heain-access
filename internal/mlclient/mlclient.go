@@ -14,8 +14,9 @@ import (
 	"time"
 )
 
-// DefaultTimeout is generous for CPU-only inference (OCR included), matching
-// the convention already used by heain-image's own mlclient package.
+// DefaultTimeout is generous for CPU-only inference (OCR, face embedding
+// included), matching the convention already used by heain-image's own
+// mlclient package.
 const DefaultTimeout = 60 * time.Second
 
 type ocrRequest struct {
@@ -68,4 +69,62 @@ func ExtractText(ctx context.Context, sidecarURL, imageB64 string) (string, floa
 	}
 
 	return out.Text, out.Confidence, nil
+}
+
+type embedRequest struct {
+	ImageB64 string `json:"image_b64"`
+}
+
+type embedResponse struct {
+	FaceDetected bool      `json:"face_detected"`
+	Embedding    []float64 `json:"embedding"`
+	Confidence   float64   `json:"confidence"`
+	Error        string    `json:"error"`
+}
+
+// EmbedFace calls the face sidecar's POST /embed endpoint. It returns
+// faceDetected=false (with a nil embedding, no error) when the sidecar ran
+// successfully but found no face in the image -- that is a normal outcome
+// for bad evidence, not a failure to evaluate it. embedding is the raw
+// face-recognition embedding vector (model-specific length; heain-access's
+// FaceVerifier only ever compares two embeddings produced by the same
+// sidecar, so it never needs to know the length itself). confidence is the
+// sidecar's own face-detection confidence, in [0,1].
+func EmbedFace(ctx context.Context, sidecarURL, imageB64 string) (embedding []float64, faceDetected bool, confidence float64, err error) {
+	reqBody, err := json.Marshal(embedRequest{ImageB64: imageB64})
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("mlclient: encoding request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecarURL+"/embed", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("mlclient: building request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: DefaultTimeout}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("mlclient: calling face sidecar: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("mlclient: reading face sidecar response: %w", err)
+	}
+
+	var out embedResponse
+	if jsonErr := json.Unmarshal(body, &out); jsonErr != nil {
+		return nil, false, 0, fmt.Errorf("mlclient: decoding face sidecar response: %w", jsonErr)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, false, 0, fmt.Errorf("mlclient: face sidecar error: %s", out.Error)
+		}
+		return nil, false, 0, fmt.Errorf("mlclient: face sidecar returned HTTP %d", resp.StatusCode)
+	}
+
+	return out.Embedding, out.FaceDetected, out.Confidence, nil
 }

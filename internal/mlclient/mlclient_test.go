@@ -55,3 +55,76 @@ func TestExtractText_Unreachable(t *testing.T) {
 		t.Fatal("expected an error when the sidecar is unreachable, got nil")
 	}
 }
+
+func TestEmbedFace_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embed" {
+			t.Errorf("got path %q, want /embed", r.URL.Path)
+		}
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		if req.ImageB64 != "ZmFrZQ==" {
+			t.Errorf("got image_b64 %q, want ZmFrZQ==", req.ImageB64)
+		}
+		_ = json.NewEncoder(w).Encode(embedResponse{
+			FaceDetected: true,
+			Embedding:    []float64{0.1, 0.2, 0.3},
+			Confidence:   0.95,
+		})
+	}))
+	defer srv.Close()
+
+	embedding, detected, confidence, err := EmbedFace(context.Background(), srv.URL, "ZmFrZQ==")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !detected {
+		t.Error("expected faceDetected to be true")
+	}
+	if len(embedding) != 3 {
+		t.Errorf("got embedding length %d, want 3", len(embedding))
+	}
+	if confidence != 0.95 {
+		t.Errorf("got confidence %v, want 0.95", confidence)
+	}
+}
+
+func TestEmbedFace_NoFaceDetected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(embedResponse{FaceDetected: false})
+	}))
+	defer srv.Close()
+
+	embedding, detected, _, err := EmbedFace(context.Background(), srv.URL, "ZmFrZQ==")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detected {
+		t.Error("expected faceDetected to be false")
+	}
+	if len(embedding) != 0 {
+		t.Errorf("expected an empty embedding when no face was detected, got %v", embedding)
+	}
+}
+
+func TestEmbedFace_SidecarError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(embedResponse{Error: "model not loaded"})
+	}))
+	defer srv.Close()
+
+	_, _, _, err := EmbedFace(context.Background(), srv.URL, "ZmFrZQ==")
+	if err == nil {
+		t.Fatal("expected an error when the sidecar returns a non-200 status, got nil")
+	}
+}
+
+func TestEmbedFace_Unreachable(t *testing.T) {
+	_, _, _, err := EmbedFace(context.Background(), "http://127.0.0.1:1", "ZmFrZQ==")
+	if err == nil {
+		t.Fatal("expected an error when the sidecar is unreachable, got nil")
+	}
+}
