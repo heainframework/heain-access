@@ -1,7 +1,7 @@
 // Command heain-access runs the standalone access-control HTTP service.
-// Stage A registers only the keycard Verifier, the one Stage A method
-// whose Allow decision is genuinely deterministic and needs no model
-// choice to ship. The other four methods (ID card, face, fingerprint,
+// Stage A registers the keycard Verifier (deterministic ACL gate) and,
+// when -ocr-sidecar-url is set, the id_card Verifier (real OCR via a
+// Python sidecar). The remaining two methods (face, fingerprint,
 // DCP/KDM key issuance) are registered once their model-backed
 // implementations exist.
 package main
@@ -22,6 +22,9 @@ func main() {
 	allowedKeycardUIDs := flag.String("allowed-keycard-uids", "",
 		"comma-separated keycard UIDs allowed by the keycard Verifier "+
 			"(Stage A bootstrap; a real ACL store replaces this flag later)")
+	ocrSidecarURL := flag.String("ocr-sidecar-url", "",
+		"base URL of the OCR sidecar backing the id_card Verifier (e.g. http://localhost:9700); "+
+			"id_card is not registered when empty")
 	flag.Parse()
 
 	reg := verifier.NewRegistry()
@@ -37,11 +40,19 @@ func main() {
 		log.Fatalf("heain-access: registering keycard verifier: %v", err)
 	}
 
+	idCardRegistered := false
+	if *ocrSidecarURL != "" {
+		if err := reg.Register(verifier.NewIDCardVerifier(*ocrSidecarURL)); err != nil {
+			log.Fatalf("heain-access: registering id_card verifier: %v", err)
+		}
+		idCardRegistered = true
+	}
+
 	st := store.NewInMemoryStore()
 	srv := httpapi.NewServer(reg, st)
 
-	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s))",
-		*listenAddr, len(uids))
+	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v)",
+		*listenAddr, len(uids), idCardRegistered)
 	if err := http.ListenAndServe(*listenAddr, srv.Routes()); err != nil {
 		log.Fatalf("heain-access: %v", err)
 	}
