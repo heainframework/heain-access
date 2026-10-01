@@ -36,7 +36,7 @@ func (m VerificationMethod) Valid() bool {
 
 // AccessGrant is the generic unit of authorization issued by heain-access.
 // It deliberately carries no cryptographic material of its own (no embedded
-// key, no SMPTE/KDM trust-domain binding) — that belongs to a later,
+// key, no SMPTE/KDM trust-domain binding) -- that belongs to a later,
 // method-specific extension once heain-mastering's DCP work needs real
 // DCI/SMPTE KDM binding. Stage A ships the generic shape only.
 type AccessGrant struct {
@@ -47,10 +47,16 @@ type AccessGrant struct {
 	ValidUntil         time.Time          `json:"valid_until"`
 	VerificationMethod VerificationMethod `json:"verification_method"`
 	IssuedAt           time.Time          `json:"issued_at"`
+
+	// Output carries verifier-specific data beyond this generic shape --
+	// currently only populated by dcp_key (the generated KDM's encrypted
+	// content key, signature, recipient thumbprint, issuer certificate,
+	// and validity window). Every other Stage A method leaves this nil.
+	Output map[string]string `json:"output,omitempty"`
 }
 
 // Validate checks the grant's own invariants (not whether it is currently
-// valid in time — see IsValidAt for that). It does not check Recipient or
+// valid in time -- see IsValidAt for that). It does not check Recipient or
 // AssetRef against any external registry; that is the store's job.
 func (g AccessGrant) Validate() error {
 	if g.Recipient == "" {

@@ -1,7 +1,7 @@
 // Package httpapi wires a verifier.Registry and a store.Store into the
 // two HTTP endpoints heain-access exposes to its callers (e.g.
 // heain-mastering at DCP-build time): POST /issue-grant and
-// POST /verify-grant. heain-access is a standalone service — these
+// POST /verify-grant. heain-access is a standalone service -- these
 // endpoints are called directly, never registered into heain-job's
 // data-type strategy/registry-pool.
 package httpapi
@@ -34,7 +34,7 @@ func NewServer(reg *verifier.Registry, st store.Store) *Server {
 
 // Routes returns the configured *http.ServeMux. Callers mount it directly
 // or wrap it with their own middleware (logging, mTLS client-cert checks,
-// etc. — not yet added here; Stage A ships the generic HTTP mechanism
+// etc. -- not yet added here; Stage A ships the generic HTTP mechanism
 // first).
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -107,6 +107,7 @@ func (s *Server) handleIssueGrant(w http.ResponseWriter, r *http.Request) {
 		ValidUntil:         req.ValidUntil,
 		VerificationMethod: req.Method,
 		IssuedAt:           s.nowFunc(),
+		Output:             result.Output,
 	}
 	if err := grant.Validate(); err != nil {
 		http.Error(w, "generated grant failed validation: "+err.Error(), http.StatusInternalServerError)

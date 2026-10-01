@@ -1,15 +1,18 @@
 // Command heain-access runs the standalone access-control HTTP service.
-// Stage A registers the keycard Verifier (the one Stage A method whose
-// Allow decision is genuinely deterministic and needs no model choice to
-// ship) plus id_card, face, and fingerprint once their respective sidecar
-// URLs are configured. The remaining method (DCP/KDM key issuance) is
-// registered once its implementation exists.
+// Stage A registers all five verification methods: keycard (always on --
+// the one method whose Allow decision is genuinely deterministic and
+// needs no model choice to ship), id_card/face/fingerprint once their
+// respective ML sidecar URLs are configured, and dcp_key (DCP/KDM key
+// issuance -- itself deterministic/cryptographic, no sidecar needed) once
+// its CA/issuer certificate and key files are configured. This completes
+// heain-access's Stage A verifier set.
 package main
 
 import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/heainframework/heain-access/internal/httpapi"
@@ -31,6 +34,14 @@ func main() {
 	fingerprintSidecarURL := flag.String("fingerprint-sidecar-url", "",
 		"base URL of the fingerprint-matching sidecar (SourceAFIS) backing the fingerprint Verifier "+
 			"(e.g. http://localhost:9702); fingerprint is not registered when empty")
+	dcpKeyCAFile := flag.String("dcp-key-ca-file", "",
+		"path to a PEM file of trusted root/intermediate certificate(s) for the dcp_key Verifier "+
+			"to check a presented target playback-device (SPB) certificate against; "+
+			"dcp_key is not registered unless this and -dcp-key-issuer-cert-file/-dcp-key-issuer-key-file are all set")
+	dcpKeyIssuerCertFile := flag.String("dcp-key-issuer-cert-file", "",
+		"path to heain-access's own PEM certificate, used to sign every KDM the dcp_key Verifier issues")
+	dcpKeyIssuerKeyFile := flag.String("dcp-key-issuer-key-file", "",
+		"path to heain-access's own PEM RSA private key (PKCS#1 or PKCS#8), matching -dcp-key-issuer-cert-file")
 	flag.Parse()
 
 	reg := verifier.NewRegistry()
@@ -70,11 +81,38 @@ func main() {
 		fingerprintRegistered = true
 	}
 
+	dcpKeyRegistered := false
+	if *dcpKeyCAFile != "" || *dcpKeyIssuerCertFile != "" || *dcpKeyIssuerKeyFile != "" {
+		if *dcpKeyCAFile == "" || *dcpKeyIssuerCertFile == "" || *dcpKeyIssuerKeyFile == "" {
+			log.Fatalf("heain-access: -dcp-key-ca-file, -dcp-key-issuer-cert-file, and -dcp-key-issuer-key-file must all be set together")
+		}
+		caPEM, err := os.ReadFile(*dcpKeyCAFile)
+		if err != nil {
+			log.Fatalf("heain-access: reading -dcp-key-ca-file: %v", err)
+		}
+		issuerCertPEM, err := os.ReadFile(*dcpKeyIssuerCertFile)
+		if err != nil {
+			log.Fatalf("heain-access: reading -dcp-key-issuer-cert-file: %v", err)
+		}
+		issuerKeyPEM, err := os.ReadFile(*dcpKeyIssuerKeyFile)
+		if err != nil {
+			log.Fatalf("heain-access: reading -dcp-key-issuer-key-file: %v", err)
+		}
+		dcpKeyVerifier, err := verifier.NewDCPKeyVerifier(caPEM, issuerCertPEM, issuerKeyPEM)
+		if err != nil {
+			log.Fatalf("heain-access: constructing dcp_key verifier: %v", err)
+		}
+		if err := reg.Register(dcpKeyVerifier); err != nil {
+			log.Fatalf("heain-access: registering dcp_key verifier: %v", err)
+		}
+		dcpKeyRegistered = true
+	}
+
 	st := store.NewInMemoryStore()
 	srv := httpapi.NewServer(reg, st)
 
-	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v; fingerprint verifier registered: %v)",
-		*listenAddr, len(uids), idCardRegistered, faceRegistered, fingerprintRegistered)
+	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v; fingerprint verifier registered: %v; dcp_key verifier registered: %v)",
+		*listenAddr, len(uids), idCardRegistered, faceRegistered, fingerprintRegistered, dcpKeyRegistered)
 	if err := http.ListenAndServe(*listenAddr, srv.Routes()); err != nil {
 		log.Fatalf("heain-access: %v", err)
 	}
