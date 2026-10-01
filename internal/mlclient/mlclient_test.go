@@ -144,7 +144,7 @@ func TestMatchFingerprint_Success(t *testing.T) {
 		if req.EnrolledImageB64 != "ZW5yb2xsZWQ=" {
 			t.Errorf("got enrolled_image_b64 %q, want ZW5yb2xsZWQ=", req.EnrolledImageB64)
 		}
-		_ = json.NewEncoder(w).Encode(fingerprintResponse{Score: 87.5})
+		_ = json.NewEncoder(w).Encode(fingerprintResponse{Score: 0.92})
 	}))
 	defer srv.Close()
 
@@ -152,8 +152,8 @@ func TestMatchFingerprint_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if score != 87.5 {
-		t.Errorf("got score %v, want 87.5", score)
+	if score != 0.92 {
+		t.Errorf("got score %v, want 0.92", score)
 	}
 }
 

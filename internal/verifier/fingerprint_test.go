@@ -18,7 +18,7 @@ func TestFingerprintVerifier_Match(t *testing.T) {
 	v := &FingerprintVerifier{
 		sidecarURL: "http://unused",
 		threshold:  DefaultFingerprintMatchThreshold,
-		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 87.5}),
+		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 1.0}),
 	}
 
 	res, err := v.Verify(context.Background(), VerifyInput{
@@ -33,8 +33,8 @@ func TestFingerprintVerifier_Match(t *testing.T) {
 	if !res.Allow {
 		t.Error("expected Allow to be true for a score above threshold")
 	}
-	if res.Confidence != 0.875 {
-		t.Errorf("got confidence %v, want 0.875", res.Confidence)
+	if res.Confidence != 1.0 {
+		t.Errorf("got confidence %v, want 1.0", res.Confidence)
 	}
 }
 
@@ -42,7 +42,7 @@ func TestFingerprintVerifier_Mismatch(t *testing.T) {
 	v := &FingerprintVerifier{
 		sidecarURL: "http://unused",
 		threshold:  DefaultFingerprintMatchThreshold,
-		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 5.2}),
+		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 0.14}),
 	}
 
 	res, err := v.Verify(context.Background(), VerifyInput{
@@ -62,11 +62,11 @@ func TestFingerprintVerifier_Mismatch(t *testing.T) {
 	}
 }
 
-func TestFingerprintVerifier_ConfidenceClampedAtOne(t *testing.T) {
+func TestFingerprintVerifier_JustBelowThreshold(t *testing.T) {
 	v := &FingerprintVerifier{
 		sidecarURL: "http://unused",
 		threshold:  DefaultFingerprintMatchThreshold,
-		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 250}),
+		match:      stubMatcher(map[[2]string]float64{{"presented-img", "enrolled-img"}: 0.79}),
 	}
 
 	res, err := v.Verify(context.Background(), VerifyInput{
@@ -78,11 +78,8 @@ func TestFingerprintVerifier_ConfidenceClampedAtOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !res.Allow {
-		t.Error("expected Allow to be true for a very high score")
-	}
-	if res.Confidence != 1 {
-		t.Errorf("got confidence %v, want 1 (clamped)", res.Confidence)
+	if res.Allow {
+		t.Error("expected Allow to be false for a score just below the 0.8 threshold")
 	}
 }
 

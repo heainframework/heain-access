@@ -8,20 +8,16 @@ import (
 	"github.com/heainframework/heain-access/internal/mlclient"
 )
 
-// DefaultFingerprintMatchThreshold is the minimum SourceAFIS match score for
-// FingerprintVerifier to Allow. SourceAFIS's own documentation treats a
-// score around this level as a genuine match at a practical false-match
-// rate (roughly FMR 0.01%); like DefaultFaceMatchThreshold, it is a Stage A
-// starting point, not a value calibrated against this deployment's own
-// labeled genuine/impostor dataset, which doesn't exist yet.
-const DefaultFingerprintMatchThreshold = 40.0
-
-// fingerprintConfidenceDivisor normalizes SourceAFIS's unbounded raw match
-// score into a [0,1] Confidence for Result, consistent with the other
-// confidence-scored Verifiers. It is a display/reporting convenience only --
-// it never affects the Allow decision, which compares the raw score against
-// threshold directly.
-const fingerprintConfidenceDivisor = 100.0
+// DefaultFingerprintMatchThreshold is the minimum normalized match score
+// (in [0,1]) for FingerprintVerifier to Allow. It is taken directly from
+// the fingerprint engine's own documented default for its matcher (NIST
+// NBIS's Bozorth3, via the `afis` package's
+// DEFAULT_THRESHOLDS["nbis_bozorth3"] == 0.8, confirmed live against the
+// real installed package) -- unlike DefaultFaceMatchThreshold, this is the
+// engine's own calibrated recommendation, not an uncalibrated guess, though
+// it has not been separately re-validated against this deployment's own
+// labeled genuine/impostor dataset.
+const DefaultFingerprintMatchThreshold = 0.8
 
 // matchFunc is the shape of the fingerprint-matching call FingerprintVerifier
 // delegates to. Production code uses mlclient.MatchFingerprint; tests inject
@@ -32,13 +28,17 @@ type matchFunc func(ctx context.Context, sidecarURL, presentedImageB64, enrolled
 // method.
 //
 // Per the user's explicit requirement, the sidecar behind this Verifier
-// wraps a production-grade fingerprint matching engine (SourceAFIS), not a
-// toy feature-matcher. Same "ML for the inherently non-deterministic part,
-// deterministic Go for the rest" split already used by id_card and face:
-// the sidecar does the actual minutiae extraction and matching (real ML/CV,
-// no honest deterministic stand-in exists for "are these two fingerprints
-// the same finger"); FingerprintVerifier's own job is the deterministic
-// half -- comparing the engine's raw match score against Threshold.
+// wraps a production-grade fingerprint matching engine -- NIST NBIS
+// (MINDTCT + Bozorth3), not a toy feature-matcher. (SourceAFIS itself has
+// no official Python port, only Java and .NET; NBIS is the real
+// production-grade substitute used instead -- it is itself the reference
+// AFIS implementation used in real government systems.) Same "ML for the
+// inherently non-deterministic part, deterministic Go for the rest" split
+// already used by id_card and face: the sidecar does the actual minutiae
+// extraction and matching (real CV, no honest deterministic stand-in
+// exists for "are these two fingerprints the same finger"); the sidecar
+// already returns a normalized [0,1] score, and FingerprintVerifier's own
+// job is the deterministic half -- comparing that score against Threshold.
 //
 // Stage A has no persistent enrollment store (mirrors face's and id_card's
 // own Stage A simplifications), so the caller supplies the enrolled
@@ -82,17 +82,9 @@ func (v *FingerprintVerifier) Verify(ctx context.Context, in VerifyInput) (Resul
 		return Result{}, fmt.Errorf("verifier: fingerprint match failed: %w", err)
 	}
 
-	confidence := score / fingerprintConfidenceDivisor
-	if confidence > 1 {
-		confidence = 1
-	}
-	if confidence < 0 {
-		confidence = 0
-	}
-
 	if score < v.threshold {
-		return Denied(fmt.Sprintf("fingerprint match score %.2f is below the match threshold %.2f", score, v.threshold)), nil
+		return Denied(fmt.Sprintf("fingerprint match score %.4f is below the match threshold %.4f", score, v.threshold)), nil
 	}
 
-	return Allowed(confidence), nil
+	return Allowed(score), nil
 }

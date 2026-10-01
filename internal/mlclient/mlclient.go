@@ -140,12 +140,15 @@ type fingerprintResponse struct {
 }
 
 // MatchFingerprint calls the fingerprint sidecar's POST /match endpoint,
-// which wraps a production-grade fingerprint matching engine (SourceAFIS)
-// rather than a toy feature-matcher, per the user's explicit requirement.
-// It returns the engine's raw match score: an unbounded, non-negative
-// number where SourceAFIS's own documentation treats roughly 40+ as a
-// genuine match at a practical false-match rate. Score normalization and
-// thresholding are the caller's (FingerprintVerifier's) job, not the
+// which wraps a production-grade fingerprint matching engine -- NIST NBIS
+// (MINDTCT minutiae extraction + Bozorth3 matching, via the `afis` Python
+// package) -- rather than a toy feature-matcher, per the user's explicit
+// requirement. (SourceAFIS itself has no official Python port, only Java
+// and .NET; NBIS is the real production-grade engine used instead, and is
+// itself the reference AFIS implementation used in real government
+// systems.) It returns the engine's own normalized match score in [0,1]
+// (afis's MatchResult.score, not its unbounded raw_score). Thresholding
+// against that score is the caller's (FingerprintVerifier's) job, not the
 // sidecar's -- matching the same "ML for the non-deterministic part,
 // deterministic Go for the rest" split already used by id_card and face.
 func MatchFingerprint(ctx context.Context, sidecarURL, presentedImageB64, enrolledImageB64 string) (float64, error) {
