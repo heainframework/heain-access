@@ -1,9 +1,9 @@
 // Command heain-access runs the standalone access-control HTTP service.
-// Stage A registers the keycard Verifier (deterministic ACL gate) and,
-// when the corresponding sidecar URL flags are set, the id_card and face
-// Verifiers (real ML via Python sidecars). The remaining two methods
-// (fingerprint, DCP/KDM key issuance) are registered once their
-// model-backed implementations exist.
+// Stage A registers the keycard Verifier (the one Stage A method whose
+// Allow decision is genuinely deterministic and needs no model choice to
+// ship) plus id_card, face, and fingerprint once their respective sidecar
+// URLs are configured. The remaining method (DCP/KDM key issuance) is
+// registered once its implementation exists.
 package main
 
 import (
@@ -28,6 +28,9 @@ func main() {
 	faceSidecarURL := flag.String("face-sidecar-url", "",
 		"base URL of the face-embedding sidecar backing the face Verifier (e.g. http://localhost:9701); "+
 			"face is not registered when empty")
+	fingerprintSidecarURL := flag.String("fingerprint-sidecar-url", "",
+		"base URL of the fingerprint-matching sidecar (SourceAFIS) backing the fingerprint Verifier "+
+			"(e.g. http://localhost:9702); fingerprint is not registered when empty")
 	flag.Parse()
 
 	reg := verifier.NewRegistry()
@@ -59,11 +62,19 @@ func main() {
 		faceRegistered = true
 	}
 
+	fingerprintRegistered := false
+	if *fingerprintSidecarURL != "" {
+		if err := reg.Register(verifier.NewFingerprintVerifier(*fingerprintSidecarURL)); err != nil {
+			log.Fatalf("heain-access: registering fingerprint verifier: %v", err)
+		}
+		fingerprintRegistered = true
+	}
+
 	st := store.NewInMemoryStore()
 	srv := httpapi.NewServer(reg, st)
 
-	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v)",
-		*listenAddr, len(uids), idCardRegistered, faceRegistered)
+	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v; fingerprint verifier registered: %v)",
+		*listenAddr, len(uids), idCardRegistered, faceRegistered, fingerprintRegistered)
 	if err := http.ListenAndServe(*listenAddr, srv.Routes()); err != nil {
 		log.Fatalf("heain-access: %v", err)
 	}

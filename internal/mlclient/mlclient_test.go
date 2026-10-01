@@ -128,3 +128,51 @@ func TestEmbedFace_Unreachable(t *testing.T) {
 		t.Fatal("expected an error when the sidecar is unreachable, got nil")
 	}
 }
+
+func TestMatchFingerprint_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/match" {
+			t.Errorf("got path %q, want /match", r.URL.Path)
+		}
+		var req fingerprintRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		if req.PresentedImageB64 != "cHJlc2VudGVk" {
+			t.Errorf("got presented_image_b64 %q, want cHJlc2VudGVk", req.PresentedImageB64)
+		}
+		if req.EnrolledImageB64 != "ZW5yb2xsZWQ=" {
+			t.Errorf("got enrolled_image_b64 %q, want ZW5yb2xsZWQ=", req.EnrolledImageB64)
+		}
+		_ = json.NewEncoder(w).Encode(fingerprintResponse{Score: 87.5})
+	}))
+	defer srv.Close()
+
+	score, err := MatchFingerprint(context.Background(), srv.URL, "cHJlc2VudGVk", "ZW5yb2xsZWQ=")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if score != 87.5 {
+		t.Errorf("got score %v, want 87.5", score)
+	}
+}
+
+func TestMatchFingerprint_SidecarError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(fingerprintResponse{Error: "engine not loaded"})
+	}))
+	defer srv.Close()
+
+	_, err := MatchFingerprint(context.Background(), srv.URL, "cHJlc2VudGVk", "ZW5yb2xsZWQ=")
+	if err == nil {
+		t.Fatal("expected an error when the sidecar returns a non-200 status, got nil")
+	}
+}
+
+func TestMatchFingerprint_Unreachable(t *testing.T) {
+	_, err := MatchFingerprint(context.Background(), "http://127.0.0.1:1", "cHJlc2VudGVk", "ZW5yb2xsZWQ=")
+	if err == nil {
+		t.Fatal("expected an error when the sidecar is unreachable, got nil")
+	}
+}

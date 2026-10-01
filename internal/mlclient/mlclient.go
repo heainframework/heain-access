@@ -128,3 +128,64 @@ func EmbedFace(ctx context.Context, sidecarURL, imageB64 string) (embedding []fl
 
 	return out.Embedding, out.FaceDetected, out.Confidence, nil
 }
+
+type fingerprintRequest struct {
+	PresentedImageB64 string `json:"presented_image_b64"`
+	EnrolledImageB64  string `json:"enrolled_image_b64"`
+}
+
+type fingerprintResponse struct {
+	Score float64 `json:"score"`
+	Error string  `json:"error"`
+}
+
+// MatchFingerprint calls the fingerprint sidecar's POST /match endpoint,
+// which wraps a production-grade fingerprint matching engine (SourceAFIS)
+// rather than a toy feature-matcher, per the user's explicit requirement.
+// It returns the engine's raw match score: an unbounded, non-negative
+// number where SourceAFIS's own documentation treats roughly 40+ as a
+// genuine match at a practical false-match rate. Score normalization and
+// thresholding are the caller's (FingerprintVerifier's) job, not the
+// sidecar's -- matching the same "ML for the non-deterministic part,
+// deterministic Go for the rest" split already used by id_card and face.
+func MatchFingerprint(ctx context.Context, sidecarURL, presentedImageB64, enrolledImageB64 string) (float64, error) {
+	reqBody, err := json.Marshal(fingerprintRequest{
+		PresentedImageB64: presentedImageB64,
+		EnrolledImageB64:  enrolledImageB64,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("mlclient: encoding request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecarURL+"/match", bytes.NewReader(reqBody))
+	if err != nil {
+		return 0, fmt.Errorf("mlclient: building request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: DefaultTimeout}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return 0, fmt.Errorf("mlclient: calling fingerprint sidecar: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("mlclient: reading fingerprint sidecar response: %w", err)
+	}
+
+	var out fingerprintResponse
+	if jsonErr := json.Unmarshal(body, &out); jsonErr != nil {
+		return 0, fmt.Errorf("mlclient: decoding fingerprint sidecar response: %w", jsonErr)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return 0, fmt.Errorf("mlclient: fingerprint sidecar error: %s", out.Error)
+		}
+		return 0, fmt.Errorf("mlclient: fingerprint sidecar returned HTTP %d", resp.StatusCode)
+	}
+
+	return out.Score, nil
+}
