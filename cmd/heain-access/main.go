@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,7 +41,8 @@ func main() {
 	aclDS := flag.String("keycard-acl-dataset", "keycards", "heain-database dataset holding allowed keycard UIDs")
 	aclScope := flag.String("keycard-acl-scope", "default", "its scope_key")
 	dcpCA := flag.String("dcp-key-ca-file", "", "dcp-key plugin: trusted root(s) for target playback-device certificates (plugin off when empty)")
-	dcpCert := flag.String("dcp-key-issuer-cert-file", "", "dcp-key plugin: issuer certificate")
+	dcpCert := flag.String("dcp-key-issuer-cert-file", "", "dcp-key plugin: issuer certificate chain, leaf first (the KDM signer)")
+	dcpCallers := flag.String("dcp-key-callers", "heain-mastering", "dcp-key plugin: comma-separated apps allowed to ask for KDMs")
 	dcpKey := flag.String("dcp-key-issuer-key-file", "", "dcp-key plugin: issuer RSA key")
 	flag.Parse()
 	if *retention <= 0 || *retention > 30*24*time.Hour {
@@ -103,7 +105,13 @@ func main() {
 		if a.KDM, err = dcpkey.New(caPEM, certPEM, keyPEM); err != nil {
 			log.Fatalf("heain-access: dcp-key plugin: %v", err)
 		}
-		log.Printf("heain-access: plugin dcp-key enabled")
+		a.KDMCallers = map[string]bool{}
+		for _, c := range strings.Split(*dcpCallers, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				a.KDMCallers[c] = true
+			}
+		}
+		log.Printf("heain-access: plugin dcp-key enabled (SMPTE 430-1 KDMs, callers %s)", *dcpCallers)
 	}
 	srv := app.NewServer()
 	if err := a.Register(srv); err != nil {

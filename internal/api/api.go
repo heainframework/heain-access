@@ -32,12 +32,15 @@ import (
 
 // API ties the stores, sidecars and plugin to the endpoints.
 type API struct {
-	App     *heain.App
-	Side    *sidecar.Client
-	Bio     *biometric.Store
-	Grants  *grants.Store
-	KDM     *dcpkey.Issuer // nil: the dcp-key plugin is not enabled
-	Runtime string         // sidecar description for reasoning records
+	App    *heain.App
+	Side   *sidecar.Client
+	Bio    *biometric.Store
+	Grants *grants.Store
+	KDM    *dcpkey.Issuer // nil: the dcp-key plugin is not enabled
+	// KDMCallers are the apps allowed to ask for a KDM (the plugin signs
+	// whatever content keys it is given).
+	KDMCallers map[string]bool
+	Runtime    string // sidecar description for reasoning records
 
 	FaceThreshold   float64       // cosine similarity
 	FingerThreshold float64       // sidecar score
@@ -519,20 +522,31 @@ func (a *API) issueKDM(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotImplemented, "plugin_not_enabled", "the dcp-key plugin is not enabled on this instance")
 		return
 	}
-	var b struct {
-		Evidence map[string]string `json:"evidence"`
+	c := heain.Caller(r.Context())
+	if i := strings.IndexByte(c, '.'); i > 0 {
+		c = c[:i]
 	}
+	if !a.KDMCallers[c] {
+		fail(w, http.StatusForbidden, "forbidden", "app "+c+" may not ask for KDMs (-dcp-key-callers)")
+		return
+	}
+	var b dcpkey.Request
 	if !decode(w, r, &b) {
 		return
 	}
-	res, err := a.KDM.Issue(r.Context(), dcpkey.Input{Evidence: b.Evidence})
+	res, err := a.KDM.Issue(r.Context(), b)
 	if err != nil {
-		fail(w, http.StatusBadRequest, "bad_request", err.Error())
+		var br *dcpkey.BadRequest
+		if errors.As(err, &br) {
+			fail(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		fail(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	if !res.Allow {
 		reply(w, http.StatusOK, map[string]any{"issued": false, "reason": res.Reason})
 		return
 	}
-	reply(w, http.StatusOK, map[string]any{"issued": true, "kdm": res.Output})
+	reply(w, http.StatusOK, map[string]any{"issued": true, "kdm_xml": string(res.KDM), "message_id": res.MessageID, "recipient": res.Recipient})
 }

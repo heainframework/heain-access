@@ -31,3 +31,13 @@ Every face, fingerprint and ID-card decision (and enrolment) files a signed AI r
 Tests: `go test ./...`; live `bash scripts/live_4d.sh` (needs `~/heain-core`, `~/heain-sdk`, `~/heain-database`; stub sidecars); conformance `heain-conformance run --app .` (heain-database as companion).
 
 **Not yet:** a live run with the real models on fresh test images; the keycard anomaly model; full DCI/SMPTE KDM XML.
+
+**Step 4j (2026-10-06): the dcp-key plugin issues real SMPTE KDMs.** `POST /v1/plugins/dcp-key/kdm` now takes
+`{"target_certificate_pem", "cpl_id", "content_title_text", "not_valid_before", "not_valid_after", "keys":[{"type":"MDIK|MDAK|…","id","key_hex"}], "content_authenticator"?, "annotation_text"?, "device_list"?: "assume_trust"|"recipient"}`
+(the earlier `{"evidence":{…}}` body is gone) and answers `{"issued": true, "kdm_xml", "message_id", "recipient"}` or
+`{"issued": false, "reason"}`. The KDM is an SMPTE ST 430-1 KDM in the ST 430-3 envelope: one RSA-OAEP (SHA-1, MGF1)
+138-byte cipher block per content key to the target certificate, which must chain to `-dcp-key-ca-file` (intermediates
+may follow the leaf); signed with XML Signature (RSA-SHA256) by `-dcp-key-issuer-cert-file` (a chain, leaf first).
+Only the apps in `-dcp-key-callers` (default `heain-mastering`) may ask: the plugin signs whatever keys it is given, and
+heain-mastering asks only after an Approver has approved the request through P5. `internal/xmldsig` is the shared
+canonical-XML writer and signer (the same file is in heain-mastering).
