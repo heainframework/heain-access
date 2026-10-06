@@ -1,119 +1,138 @@
-// Command heain-access runs the standalone access-control HTTP service.
-// Stage A registers all five verification methods: keycard (always on --
-// the one method whose Allow decision is genuinely deterministic and
-// needs no model choice to ship), id_card/face/fingerprint once their
-// respective ML sidecar URLs are configured, and dcp_key (DCP/KDM key
-// issuance -- itself deterministic/cryptographic, no sidecar needed) once
-// its CA/issuer certificate and key files are configured. This completes
-// heain-access's Stage A verifier set.
+// Command heain-access is the identity-verification and access-grant base
+// app: face and fingerprint enrolment (templates only, sealed, retention at
+// most 30 days) and matching, ID-card OCR with an optional registry check
+// in heain-database, keycards against an ACL dataset in heain-database, and
+// signed AccessGrants. The AI models run as local sidecars (heain-sidecar/v1).
+// The dcp-key plugin (KDM issuance for cinema packages) is optional.
+// Configured through the heain-sdk HEAIN_* variables; runs however the
+// operator likes: a plain process, a service unit, or a container.
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"os"
-	"strings"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 
-	"github.com/heainframework/heain-access/internal/httpapi"
-	"github.com/heainframework/heain-access/internal/store"
-	"github.com/heainframework/heain-access/internal/verifier"
+	"github.com/heainframework/heain-sdk/heain"
+
+	"github.com/heainframework/heain-access/internal/api"
+	"github.com/heainframework/heain-access/internal/biometric"
+	"github.com/heainframework/heain-access/internal/grants"
+	"github.com/heainframework/heain-access/internal/plugins/dcpkey"
+	"github.com/heainframework/heain-access/internal/sidecar"
 )
 
 func main() {
-	listenAddr := flag.String("listen-addr", ":8086", "address for heain-access to listen on")
-	allowedKeycardUIDs := flag.String("allowed-keycard-uids", "",
-		"comma-separated keycard UIDs allowed by the keycard Verifier "+
-			"(Stage A bootstrap; a real ACL store replaces this flag later)")
-	ocrSidecarURL := flag.String("ocr-sidecar-url", "",
-		"base URL of the OCR sidecar backing the id_card Verifier (e.g. http://localhost:9700); "+
-			"id_card is not registered when empty")
-	faceSidecarURL := flag.String("face-sidecar-url", "",
-		"base URL of the face-embedding sidecar backing the face Verifier (e.g. http://localhost:9701); "+
-			"face is not registered when empty")
-	fingerprintSidecarURL := flag.String("fingerprint-sidecar-url", "",
-		"base URL of the fingerprint-matching sidecar (SourceAFIS) backing the fingerprint Verifier "+
-			"(e.g. http://localhost:9702); fingerprint is not registered when empty")
-	dcpKeyCAFile := flag.String("dcp-key-ca-file", "",
-		"path to a PEM file of trusted root/intermediate certificate(s) for the dcp_key Verifier "+
-			"to check a presented target playback-device (SPB) certificate against; "+
-			"dcp_key is not registered unless this and -dcp-key-issuer-cert-file/-dcp-key-issuer-key-file are all set")
-	dcpKeyIssuerCertFile := flag.String("dcp-key-issuer-cert-file", "",
-		"path to heain-access's own PEM certificate, used to sign every KDM the dcp_key Verifier issues")
-	dcpKeyIssuerKeyFile := flag.String("dcp-key-issuer-key-file", "",
-		"path to heain-access's own PEM RSA private key (PKCS#1 or PKCS#8), matching -dcp-key-issuer-cert-file")
+	ocr := flag.String("ocr-sidecar-url", "http://127.0.0.1:9700", "OCR sidecar (EasyOCR), localhost only")
+	face := flag.String("face-sidecar-url", "http://127.0.0.1:9701", "face sidecar (InsightFace), localhost only")
+	finger := flag.String("fingerprint-sidecar-url", "http://127.0.0.1:9702", "fingerprint sidecar (NBIS), localhost only")
+	stub := flag.Bool("test-stub-sidecars", false, "TEST ONLY: deterministic model-free stand-ins for the three sidecars")
+	faceThr := flag.Float64("face-threshold", 0.5, "minimum cosine similarity for a face match")
+	fpThr := flag.Float64("fingerprint-threshold", 0.8, "minimum match score for a fingerprint match")
+	retention := flag.Duration("retention", 30*24*time.Hour, "how long an enrolled template is kept (at most 720h, the manifest's retention max)")
+	aclDS := flag.String("keycard-acl-dataset", "keycards", "heain-database dataset holding allowed keycard UIDs")
+	aclScope := flag.String("keycard-acl-scope", "default", "its scope_key")
+	dcpCA := flag.String("dcp-key-ca-file", "", "dcp-key plugin: trusted root(s) for target playback-device certificates (plugin off when empty)")
+	dcpCert := flag.String("dcp-key-issuer-cert-file", "", "dcp-key plugin: issuer certificate")
+	dcpKey := flag.String("dcp-key-issuer-key-file", "", "dcp-key plugin: issuer RSA key")
 	flag.Parse()
-
-	reg := verifier.NewRegistry()
-
-	var uids []string
-	for _, uid := range strings.Split(*allowedKeycardUIDs, ",") {
-		uid = strings.TrimSpace(uid)
-		if uid != "" {
-			uids = append(uids, uid)
-		}
+	if *retention <= 0 || *retention > 30*24*time.Hour {
+		log.Fatal("heain-access: -retention must be within 0..720h (manifest biometric_template retention max 30d)")
 	}
-	if err := reg.Register(verifier.NewKeycardVerifier(uids)); err != nil {
-		log.Fatalf("heain-access: registering keycard verifier: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	app, err := heain.StartFromEnv(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "REFUSED: %v\n", err)
+		os.Exit(2)
 	}
-
-	idCardRegistered := false
-	if *ocrSidecarURL != "" {
-		if err := reg.Register(verifier.NewIDCardVerifier(*ocrSidecarURL)); err != nil {
-			log.Fatalf("heain-access: registering id_card verifier: %v", err)
-		}
-		idCardRegistered = true
+	log.Printf("heain-access: registered (%s), waiting for admission", app.Status())
+	if err := app.WaitActive(ctx); err != nil {
+		log.Fatal(err)
 	}
-
-	faceRegistered := false
-	if *faceSidecarURL != "" {
-		if err := reg.Register(verifier.NewFaceVerifier(*faceSidecarURL)); err != nil {
-			log.Fatalf("heain-access: registering face verifier: %v", err)
-		}
-		faceRegistered = true
+	state := os.Getenv("HEAIN_STATE_DIR")
+	if state == "" {
+		state = "/state"
 	}
-
-	fingerprintRegistered := false
-	if *fingerprintSidecarURL != "" {
-		if err := reg.Register(verifier.NewFingerprintVerifier(*fingerprintSidecarURL)); err != nil {
-			log.Fatalf("heain-access: registering fingerprint verifier: %v", err)
-		}
-		fingerprintRegistered = true
+	ik, err := app.DataKey(ctx, "inside")
+	if err != nil {
+		log.Fatalf("heain-access: data key from core: %v", err)
 	}
-
-	dcpKeyRegistered := false
-	if *dcpKeyCAFile != "" || *dcpKeyIssuerCertFile != "" || *dcpKeyIssuerKeyFile != "" {
-		if *dcpKeyCAFile == "" || *dcpKeyIssuerCertFile == "" || *dcpKeyIssuerKeyFile == "" {
-			log.Fatalf("heain-access: -dcp-key-ca-file, -dcp-key-issuer-cert-file, and -dcp-key-issuer-key-file must all be set together")
-		}
-		caPEM, err := os.ReadFile(*dcpKeyCAFile)
+	inside, err := heain.NewSealer(ik)
+	if err != nil {
+		log.Fatal(err)
+	}
+	bio, err := biometric.Open(filepath.Join(state, "templates.db"), inside, ik, biometric.Keys{Sealer: app.Sealer, Destroy: app.DestroyDataKey})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer bio.Close()
+	gs, err := grants.Open(filepath.Join(state, "grants.db"), inside, app)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer gs.Close()
+	side := &sidecar.Client{OCR: *ocr, Face: *face, Finger: *finger}
+	runtime := "sidecars heain-sidecar/v1 (EasyOCR, InsightFace buffalo_l, NBIS)"
+	if *stub {
+		base, stopStub, err := sidecar.Stub()
 		if err != nil {
-			log.Fatalf("heain-access: reading -dcp-key-ca-file: %v", err)
+			log.Fatal(err)
 		}
-		issuerCertPEM, err := os.ReadFile(*dcpKeyIssuerCertFile)
-		if err != nil {
-			log.Fatalf("heain-access: reading -dcp-key-issuer-cert-file: %v", err)
-		}
-		issuerKeyPEM, err := os.ReadFile(*dcpKeyIssuerKeyFile)
-		if err != nil {
-			log.Fatalf("heain-access: reading -dcp-key-issuer-key-file: %v", err)
-		}
-		dcpKeyVerifier, err := verifier.NewDCPKeyVerifier(caPEM, issuerCertPEM, issuerKeyPEM)
-		if err != nil {
-			log.Fatalf("heain-access: constructing dcp_key verifier: %v", err)
-		}
-		if err := reg.Register(dcpKeyVerifier); err != nil {
-			log.Fatalf("heain-access: registering dcp_key verifier: %v", err)
-		}
-		dcpKeyRegistered = true
+		defer stopStub()
+		side = &sidecar.Client{OCR: base, Face: base, Finger: base}
+		runtime = "TEST STUB sidecars (no model)"
+		log.Printf("heain-access: WARNING -test-stub-sidecars: model-free stand-ins, TEST ONLY")
 	}
-
-	st := store.NewInMemoryStore()
-	srv := httpapi.NewServer(reg, st)
-
-	log.Printf("heain-access: listening on %s (keycard verifier registered with %d allowed UID(s); id_card verifier registered: %v; face verifier registered: %v; fingerprint verifier registered: %v; dcp_key verifier registered: %v)",
-		*listenAddr, len(uids), idCardRegistered, faceRegistered, fingerprintRegistered, dcpKeyRegistered)
-	if err := http.ListenAndServe(*listenAddr, srv.Routes()); err != nil {
-		log.Fatalf("heain-access: %v", err)
+	a := &api.API{App: app, Side: side, Bio: bio, Grants: gs, Runtime: runtime, FaceThreshold: *faceThr, FingerThreshold: *fpThr,
+		Retention: *retention, ACLDataset: *aclDS, ACLScope: *aclScope}
+	if *dcpCA != "" {
+		caPEM, err1 := os.ReadFile(*dcpCA)
+		certPEM, err2 := os.ReadFile(*dcpCert)
+		keyPEM, err3 := os.ReadFile(*dcpKey)
+		if err1 != nil || err2 != nil || err3 != nil {
+			log.Fatalf("heain-access: dcp-key plugin files: %v %v %v", err1, err2, err3)
+		}
+		if a.KDM, err = dcpkey.New(caPEM, certPEM, keyPEM); err != nil {
+			log.Fatalf("heain-access: dcp-key plugin: %v", err)
+		}
+		log.Printf("heain-access: plugin dcp-key enabled")
 	}
+	srv := app.NewServer()
+	if err := a.Register(srv); err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			if n, err := bio.Sweep(ctx); err != nil {
+				log.Printf("heain-access: retention sweep: %v", err)
+			} else if n > 0 {
+				log.Printf("heain-access: retention sweep removed %d template(s)", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	l, err := net.Listen("tcp", heain.Listen(":19480"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("heain-access: active, serving on %s", l.Addr())
+	if err := srv.Serve(ctx, l); err != nil && ctx.Err() == nil {
+		log.Fatal(err)
+	}
+	_ = app.Close(context.Background())
+	log.Printf("heain-access: deregistered")
 }

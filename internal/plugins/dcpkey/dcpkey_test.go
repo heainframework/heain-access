@@ -1,4 +1,4 @@
-package verifier
+package dcpkey
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 	"math/big"
 	"testing"
 	"time"
-
-	"github.com/heainframework/heain-access/internal/accesswire"
 )
 
 // testCA is a self-signed root used to sign test leaf certificates.
@@ -94,14 +92,14 @@ func baseEvidence(targetCertPEM string, contentKey []byte) map[string]string {
 	}
 }
 
-func TestDCPKeyVerifier_ValidCertificate_IssuesKDM(t *testing.T) {
+func TestIssuer_ValidCertificate_IssuesKDM(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	leafPEM, leafKey := newLeafCert(t, trustedCA, "Screen 1 SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
 
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	contentKey := make([]byte, 16)
@@ -109,10 +107,8 @@ func TestDCPKeyVerifier_ValidCertificate_IssuesKDM(t *testing.T) {
 		contentKey[i] = byte(i)
 	}
 
-	res, err := v.Verify(context.Background(), VerifyInput{
-		Recipient: "screen-1",
-		AssetRef:  "asset-001",
-		Evidence:  baseEvidence(string(leafPEM), contentKey),
+	res, err := v.Issue(context.Background(), Input{
+		Evidence: baseEvidence(string(leafPEM), contentKey),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -173,18 +169,18 @@ func TestDCPKeyVerifier_ValidCertificate_IssuesKDM(t *testing.T) {
 	}
 }
 
-func TestDCPKeyVerifier_UntrustedCertificate(t *testing.T) {
+func TestIssuer_UntrustedCertificate(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	otherCA := newTestCA(t, "Some Other Root")
 	leafPEM, _ := newLeafCert(t, otherCA, "Rogue SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
 
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
-	res, err := v.Verify(context.Background(), VerifyInput{
+	res, err := v.Issue(context.Background(), Input{
 		Evidence: baseEvidence(string(leafPEM), []byte("0123456789abcdef")),
 	})
 	if err != nil {
@@ -198,18 +194,18 @@ func TestDCPKeyVerifier_UntrustedCertificate(t *testing.T) {
 	}
 }
 
-func TestDCPKeyVerifier_ExpiredCertificate(t *testing.T) {
+func TestIssuer_ExpiredCertificate(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	// Valid only in the past -- expired as of "now".
 	leafPEM, _ := newLeafCert(t, trustedCA, "Expired SPB", time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
 
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
-	res, err := v.Verify(context.Background(), VerifyInput{
+	res, err := v.Issue(context.Background(), Input{
 		Evidence: baseEvidence(string(leafPEM), []byte("0123456789abcdef")),
 	})
 	if err != nil {
@@ -220,84 +216,84 @@ func TestDCPKeyVerifier_ExpiredCertificate(t *testing.T) {
 	}
 }
 
-func TestDCPKeyVerifier_MissingTargetCertificate(t *testing.T) {
+func TestIssuer_MissingTargetCertificate(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	evidence := baseEvidence("dummy", []byte("0123456789abcdef"))
 	delete(evidence, "target_certificate_pem")
 
-	_, err = v.Verify(context.Background(), VerifyInput{Evidence: evidence})
+	_, err = v.Issue(context.Background(), Input{Evidence: evidence})
 	if err == nil {
 		t.Fatal("expected an error when target_certificate_pem evidence is missing, got nil")
 	}
 }
 
-func TestDCPKeyVerifier_MissingContentKey(t *testing.T) {
+func TestIssuer_MissingContentKey(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	leafPEM, _ := newLeafCert(t, trustedCA, "Screen 1 SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	evidence := baseEvidence(string(leafPEM), []byte("0123456789abcdef"))
 	delete(evidence, "content_key_hex")
 
-	_, err = v.Verify(context.Background(), VerifyInput{Evidence: evidence})
+	_, err = v.Issue(context.Background(), Input{Evidence: evidence})
 	if err == nil {
 		t.Fatal("expected an error when content_key_hex evidence is missing, got nil")
 	}
 }
 
-func TestDCPKeyVerifier_MissingCPLID(t *testing.T) {
+func TestIssuer_MissingCPLID(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	leafPEM, _ := newLeafCert(t, trustedCA, "Screen 1 SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	evidence := baseEvidence(string(leafPEM), []byte("0123456789abcdef"))
 	delete(evidence, "cpl_id")
 
-	_, err = v.Verify(context.Background(), VerifyInput{Evidence: evidence})
+	_, err = v.Issue(context.Background(), Input{Evidence: evidence})
 	if err == nil {
 		t.Fatal("expected an error when cpl_id evidence is missing, got nil")
 	}
 }
 
-func TestDCPKeyVerifier_InvalidContentKeyHex(t *testing.T) {
+func TestIssuer_InvalidContentKeyHex(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	leafPEM, _ := newLeafCert(t, trustedCA, "Screen 1 SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	evidence := baseEvidence(string(leafPEM), []byte("0123456789abcdef"))
 	evidence["content_key_hex"] = "not-hex!!"
 
-	_, err = v.Verify(context.Background(), VerifyInput{Evidence: evidence})
+	_, err = v.Issue(context.Background(), Input{Evidence: evidence})
 	if err == nil {
 		t.Fatal("expected an error for invalid content_key_hex, got nil")
 	}
 }
 
-func TestDCPKeyVerifier_InvalidValidityWindow(t *testing.T) {
+func TestIssuer_InvalidValidityWindow(t *testing.T) {
 	trustedCA := newTestCA(t, "Trusted Cinema Root")
 	leafPEM, _ := newLeafCert(t, trustedCA, "Screen 1 SPB", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
+	v, err := New(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
 	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	evidence := baseEvidence(string(leafPEM), []byte("0123456789abcdef"))
@@ -305,31 +301,16 @@ func TestDCPKeyVerifier_InvalidValidityWindow(t *testing.T) {
 	evidence["kdm_not_valid_before"], evidence["kdm_not_valid_after"] =
 		evidence["kdm_not_valid_after"], evidence["kdm_not_valid_before"]
 
-	_, err = v.Verify(context.Background(), VerifyInput{Evidence: evidence})
+	_, err = v.Issue(context.Background(), Input{Evidence: evidence})
 	if err == nil {
 		t.Fatal("expected an error when kdm_not_valid_after precedes kdm_not_valid_before, got nil")
 	}
 }
 
-func TestDCPKeyVerifier_Method(t *testing.T) {
-	trustedCA := newTestCA(t, "Trusted Cinema Root")
+func TestNew_InvalidCAPEM(t *testing.T) {
 	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	v, err := NewDCPKeyVerifier(trustedCA.certPEM, issuerCertPEM, issuerKeyPEM)
-	if err != nil {
-		t.Fatalf("NewDCPKeyVerifier: %v", err)
-	}
-	if v.Method() != accesswire.VerificationMethodDCPKey {
-		t.Errorf("got method %q, want %q", v.Method(), accesswire.VerificationMethodDCPKey)
-	}
-}
-
-func TestNewDCPKeyVerifier_InvalidCAPEM(t *testing.T) {
-	issuerCertPEM, issuerKeyPEM := newIssuerIdentity(t)
-	_, err := NewDCPKeyVerifier([]byte("not a cert"), issuerCertPEM, issuerKeyPEM)
+	_, err := New([]byte("not a cert"), issuerCertPEM, issuerKeyPEM)
 	if err == nil {
 		t.Fatal("expected an error for invalid CA PEM, got nil")
 	}
 }
-
-// Compile-time check that DCPKeyVerifier satisfies Verifier.
-var _ Verifier = (*DCPKeyVerifier)(nil)

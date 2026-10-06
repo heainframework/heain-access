@@ -6,3 +6,28 @@ Issues and verifies `AccessGrant`s via pluggable `Verifier` implementations
 
 Called directly by other Layer 3 modules (e.g. heain-mastering at DCP-build
 time) — not registered into heain-job's data-type strategy/registry-pool.
+
+## heain-access v2 — rebuilt on heain-sdk v1 (Step 4d, 2026-10-06)
+
+**The text above describes the Stage A version, kept as tag `legacy-v0`.** That version served plain HTTP, kept grants in memory, took the enrolled image from the caller on every check, and its keycard ACL was a flag. v2 runs through heain-core.
+
+**Author decisions (2026-10-06):** templates only, never images (data class `biometric_template`: `raw_storage: forbidden`, retention max 30 days, crypto-shred); the AI models stay Python sidecars (`ai_sidecars`, contract heain-sidecar/v1, localhost only); keycard ACLs and reference registries live in heain-database; `dcp-key` is an optional plugin.
+
+| Capability (lane) | Endpoint | |
+|---|---|---|
+| `identity.enroll.face` / `.fingerprint` (identity, AI) | `POST /v1/enroll/face` · `/v1/enroll/fingerprint` `{"subject","image_b64"}` | the sidecar reduces the image to an embedding / minutiae template; only that is kept, sealed under a per-subject data key in core's KMS |
+| `identity.subject.remove` (identity) | `DELETE /v1/subjects/{subject}` | deletes the templates and destroys the subject key (crypto-shred) |
+| `identity.verify.face` / `.fingerprint` (identity, AI) | `POST /v1/verify/face` · `/v1/verify/fingerprint` `{"subject","image_b64"}` | cosine similarity ≥ `-face-threshold` (0.5) / match score ≥ `-fingerprint-threshold` (0.8) |
+| `identity.verify.idcard` (identity, AI) | `POST /v1/verify/id-card` `{"image_b64","expected_id_number","registry":{"dataset","scope_key"}}` | OCR must read the number; with `registry`, heain-database must list it and not as `"eligible": false` |
+| `identity.verify.keycard` (identity) | `POST /v1/verify/keycard` `{"uid","acl":{"dataset","scope_key"}}` | allowed when heain-database lists the uid and not as `"allowed": false` (default ACL: `-keycard-acl-dataset keycards`, `-keycard-acl-scope default`) |
+| `access.grant.issue` | `POST /v1/grants` `{"recipient","asset_ref","valid_from","valid_until","verification_id"}` | needs a successful verification from the last 10 minutes, used once; the grant is signed with the app key |
+| `access.grant.check` / `.revoke` | `GET /v1/grants/{id}` · `POST /v1/grants/{id}/check {"asset_ref"}` · `DELETE /v1/grants/{id}` | check verifies the signature, the asset, the window and revocation |
+| `access.kdm.issue` (plugin `dcp-key`) | `POST /v1/plugins/dcp-key/kdm` `{"evidence":{…}}` | the Stage A KDM issuance, enabled with `-dcp-key-ca-file`, `-dcp-key-issuer-cert-file`, `-dcp-key-issuer-key-file`; else 501 |
+
+Every face, fingerprint and ID-card decision (and enrolment) files a signed AI reasoning record with the model hash the sidecar reports on `GET /info`. Calls to `identity.*` carry `X-Heain-Lane: identity`. Subject ids are stored only as HMACs; grants and the subject index are sealed under the app's data key `inside`.
+
+**Sidecars** (`sidecars/`, each binds 127.0.0.1): OCR `:9700` (`/extract`), face `:9701` (`/embed`), fingerprint `:9702` (`/template`, `/match_template` — templates instead of images since v2). Each also answers `GET /info`. Run them however you like; `-test-stub-sidecars` (TEST ONLY) replaces all three with deterministic model-free stand-ins.
+
+Tests: `go test ./...`; live `bash scripts/live_4d.sh` (needs `~/heain-core`, `~/heain-sdk`, `~/heain-database`; stub sidecars); conformance `heain-conformance run --app .` (heain-database as companion).
+
+**Not yet:** a live run with the real models on fresh test images; the keycard anomaly model; full DCI/SMPTE KDM XML.

@@ -1,4 +1,8 @@
-package verifier
+// Package dcpkey is heain-access's optional dcp-key plugin (manifest plugins:
+// dcp-key): KDM-style key issuance for DCI cinema packages -- the one
+// industry-specific part of heain-access (author decision 2026-10-06), moved
+// unchanged from the Stage A dcp_key verifier.
+package dcpkey
 
 import (
 	"context"
@@ -13,11 +17,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/heainframework/heain-access/internal/accesswire"
 )
 
-// DCPKeyVerifier implements the dcp_key Stage A verification method: the
+// Issuer implements the dcp_key Stage A verification method: the
 // last of heain-access's five methods, and the only one that is not an
 // ML-backed match -- key issuance for digital cinema playback is an
 // inherently deterministic, cryptographic operation (there is no "model"
@@ -49,7 +51,7 @@ import (
 // configured with) is a self-signed test/demo root, not a real DCI
 // trust-chain member -- mirrored by the user's own choice of "SPB
 // certificate (simulated)" for this round's evidence.
-type DCPKeyVerifier struct {
+type Issuer struct {
 	roots       *x509.CertPool
 	issuerCert  *x509.Certificate
 	issuerKey   *rsa.PrivateKey
@@ -57,13 +59,13 @@ type DCPKeyVerifier struct {
 	now         func() time.Time
 }
 
-// NewDCPKeyVerifier builds a DCPKeyVerifier from PEM-encoded inputs:
+// NewIssuer builds a Issuer from PEM-encoded inputs:
 // caPEM is one or more trusted root/intermediate certificates against
 // which a presented target certificate is verified; issuerCertPEM and
 // issuerKeyPEM (PKCS#1 or PKCS#8 RSA) are heain-access's own signing
 // identity, used to sign every KDM this Verifier issues. All three are
 // required; an error is returned if any fail to parse.
-func NewDCPKeyVerifier(caPEM, issuerCertPEM, issuerKeyPEM []byte) (*DCPKeyVerifier, error) {
+func New(caPEM, issuerCertPEM, issuerKeyPEM []byte) (*Issuer, error) {
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("verifier: dcp_key: no valid certificates found in CA PEM")
@@ -83,7 +85,7 @@ func NewDCPKeyVerifier(caPEM, issuerCertPEM, issuerKeyPEM []byte) (*DCPKeyVerifi
 		return nil, fmt.Errorf("verifier: dcp_key: parsing issuer private key: %w", err)
 	}
 
-	return &DCPKeyVerifier{
+	return &Issuer{
 		roots:       roots,
 		issuerCert:  issuerCert,
 		issuerKey:   issuerKey,
@@ -111,10 +113,6 @@ func parseRSAPrivateKeyPEM(keyPEM []byte) (*rsa.PrivateKey, error) {
 	return rsaKey, nil
 }
 
-func (v *DCPKeyVerifier) Method() accesswire.VerificationMethod {
-	return accesswire.VerificationMethodDCPKey
-}
-
 // Verify requires the evidence keys:
 //   - "target_certificate_pem": the presented target playback device's
 //     certificate (SPB certificate), PEM-encoded, used both as the trust
@@ -132,7 +130,7 @@ func (v *DCPKeyVerifier) Method() accesswire.VerificationMethod {
 //     a caller wanting the KDM's window to match the AccessGrant's own
 //     window must pass the same two values as evidence explicitly. This
 //     duplication is a known Stage A simplification.
-func (v *DCPKeyVerifier) Verify(ctx context.Context, in VerifyInput) (Result, error) {
+func (v *Issuer) Issue(ctx context.Context, in Input) (Result, error) {
 	targetPEM, ok := in.Evidence["target_certificate_pem"]
 	if !ok || targetPEM == "" {
 		return Result{}, fmt.Errorf("verifier: dcp_key evidence missing required key %q", "target_certificate_pem")
@@ -238,9 +236,24 @@ func (v *DCPKeyVerifier) Verify(ctx context.Context, in VerifyInput) (Result, er
 	}, nil
 }
 
-func (v *DCPKeyVerifier) nowFunc() time.Time {
+func (v *Issuer) nowFunc() time.Time {
 	if v.now == nil {
 		return time.Now()
 	}
 	return v.now()
 }
+
+// Input is the KDM request: the evidence keys documented on Issue.
+type Input struct {
+	Evidence map[string]string
+}
+
+// Result is the issuer's decision; Output carries the KDM fields.
+type Result struct {
+	Allow  bool
+	Reason string
+	Output map[string]string
+}
+
+// Denied is a clean refusal.
+func Denied(reason string) Result { return Result{Reason: reason} }

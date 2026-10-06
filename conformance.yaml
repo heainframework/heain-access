@@ -1,0 +1,23 @@
+# heain-access under the heain conformance suite (heain-sdk conformance/). The AI sidecars are
+# replaced by the TEST-ONLY in-process stub (-test-stub-sidecars: no model, deterministic), so the
+# suite needs no Python or model weights; heain-database runs alongside as a companion (keycard
+# ACLs and registries are looked up there). scripts/live_4d.sh exercises the full flow, and with
+# real sidecars when they run on the host.
+manifest: heain-app.yaml
+build: [go, build, -o, heain-access, ./cmd/heain-access]
+start: [./heain-access, -test-stub-sidecars]
+port: 19480
+companions: [../heain-database]
+endpoints:
+  - {method: POST, path: /v1/enroll/face, body: {subject: conformance-secret-subject, image_b64: "ZmFjZTpjb25mLXBlcnNvbg=="}, expect: 201, secret: conformance-secret-subject}
+  - {method: POST, path: /v1/verify/face, body: {subject: conformance-secret-subject, image_b64: "ZmFjZTpjb25mLXBlcnNvbjpzZWNvbmQtcGhvdG8="}, expect: 200}
+  - {method: POST, path: /v1/enroll/fingerprint, body: {subject: conf-subject-2, image_b64: "ZmluZ2VyOmNvbmYtcGVyc29u"}, expect: 201}
+  - {method: POST, path: /v1/verify/fingerprint, body: {subject: conf-subject-2, image_b64: "ZmluZ2VyOmNvbmYtcGVyc29uOmFnYWlu"}, expect: 200}
+  - {method: POST, path: /v1/verify/id-card, body: {image_b64: "VEhBSSBOQVRJT05BTCBJRCBDQVJEIDEgMjM0NSA2Nzg5MCAxMiAz", expected_id_number: "1234567890123"}, expect: 200}
+  - {method: POST, path: /v1/verify/keycard, body: {uid: conf-card-1}, expect: 200}
+  - {method: POST, path: /v1/grants, body: {recipient: someone, asset_ref: door-1, verification_id: none}, expect: 403}
+  - {method: GET, path: /v1/grants/unknown, expect: 404}
+  - {method: POST, path: /v1/grants/unknown/check, body: {asset_ref: door-1}, expect: 404}
+  - {method: DELETE, path: /v1/grants/unknown, expect: 404}
+  - {method: POST, path: /v1/plugins/dcp-key/kdm, body: {evidence: {}}, expect: 501}
+  - {method: DELETE, path: /v1/subjects/conf-subject-2, expect: 200}

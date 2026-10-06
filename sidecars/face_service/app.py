@@ -52,10 +52,33 @@ def embed():
     })
 
 
+# heain-sidecar/v1 /info (Step 4d, 2026-10-06): the hash of the weights actually loaded,
+# for heain-access's reasoning records (spec 04 model hash).
+def _model_sha256(paths, fallback):
+    import glob, hashlib, os
+    h = hashlib.sha256()
+    files = sorted(f for p in paths for f in glob.glob(os.path.expanduser(p), recursive=True) if os.path.isfile(f))
+    for f in files:
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    if not files:
+        h.update(fallback.encode())
+    return h.hexdigest()
+
+
+_MODEL = {"name": "insightface-buffalo_l", "version": "0.7.3", "sha256": _model_sha256(["~/.insightface/models/buffalo_l/*.onnx"], "insightface " + insightface.__version__ + " buffalo_l")}
+
+
+@app.route("/info", methods=["GET"])
+def info():
+    return jsonify({"model": _MODEL})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9701)
+    app.run(host="127.0.0.1", port=9701)  # local_only (manifest ai_sidecars)
