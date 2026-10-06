@@ -388,8 +388,8 @@ type Ref struct{ URI string }
 
 // Sign appends a <dsig:Signature> (indented at depth 1) to root, which must
 // declare the dsig prefix and already be indented. Every reference is
-// digested with SHA-256; "" uses the enveloped-signature transform then
-// c14n, "#ID" none (a bare-name pointer is canonicalized by default).
+// digested with SHA-256; "" uses the enveloped-signature transform alone,
+// "#ID" none (a bare-name pointer is canonicalized by default).
 func (s *Signer) Sign(root *Elem, refs []Ref) error {
 	// the whitespace around the signature belongs to the document
 	if n := len(root.Kids); n > 0 {
@@ -407,9 +407,9 @@ func (s *Signer) Sign(root *Elem, refs []Ref) error {
 		ref := E("dsig:Reference").Attr("URI", r.URI)
 		if r.URI == "" {
 			data = Canonical(root, sig)
-			ref.Add(E("dsig:Transforms",
-				E("dsig:Transform").Attr("Algorithm", EnvelopedSig),
-				E("dsig:Transform").Attr("Algorithm", C14NWithCmt)))
+			// one transform, as libdcp writes it: after it the node-set is
+			// canonicalized (c14n without comments; there are none)
+			ref.Add(E("dsig:Transforms", E("dsig:Transform").Attr("Algorithm", EnvelopedSig)))
 		} else {
 			t := FindID(root, strings.TrimPrefix(r.URI, "#"))
 			if t == nil {
