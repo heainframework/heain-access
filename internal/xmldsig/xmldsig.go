@@ -38,6 +38,7 @@ const (
 	NSDsig         = "http://www.w3.org/2000/09/xmldsig#"
 	NSEnc          = "http://www.w3.org/2001/04/xmlenc#"
 	C14NWithCmt    = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"
+	C14N           = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
 	RSASHA256      = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
 	DigestSHA256   = "http://www.w3.org/2001/04/xmlenc#sha256"
 	EnvelopedSig   = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
@@ -386,11 +387,33 @@ func LoadSigner(chainPEM, keyPEM []byte) (*Signer, error) {
 // Ref is one reference: "#ID" or "" (the enveloping document).
 type Ref struct{ URI string }
 
-// Sign appends a <dsig:Signature> (indented at depth 1) to root, which must
-// declare the dsig prefix and already be indented. Every reference is
-// digested with SHA-256; "" uses the enveloped-signature transform alone,
-// "#ID" none (a bare-name pointer is canonicalized by default).
-func (s *Signer) Sign(root *Elem, refs []Ref) error {
+// Profile is how a kind of document is signed (the signature itself is
+// always RSA-SHA256).
+type Profile struct {
+	C14N   string // SignedInfo's canonicalization method
+	Digest string // the references' digest method: DigestSHA1 or DigestSHA256
+}
+
+var (
+	// ProfileETM: KDMs (SMPTE ST 430-3) -- c14n with comments, SHA-256 digests.
+	ProfileETM = Profile{C14N: C14NWithCmt, Digest: DigestSHA256}
+	// ProfileCPL: CPL and PKL (SMPTE ST 429-7 / 429-8, as libdcp writes and
+	// ClairMeta checks them) -- c14n without comments, SHA-1 digests.
+	ProfileCPL = Profile{C14N: C14N, Digest: DigestSHA1}
+)
+
+// Sign signs with ProfileETM.
+func (s *Signer) Sign(root *Elem, refs []Ref) error { return s.SignAs(root, refs, ProfileETM) }
+
+// SignAs appends a <dsig:Signature> (indented at depth 1) to root, which
+// must declare the dsig prefix and already be indented. "" uses the
+// enveloped-signature transform alone, "#ID" none (a bare-name pointer is
+// canonicalized by default). The documents have no comments, so the two
+// c14n methods give the same bytes.
+func (s *Signer) SignAs(root *Elem, refs []Ref, p Profile) error {
+	if (p.Digest != DigestSHA1 && p.Digest != DigestSHA256) || (p.C14N != C14N && p.C14N != C14NWithCmt) {
+		return fmt.Errorf("xmldsig: unsupported profile %+v", p)
+	}
 	// the whitespace around the signature belongs to the document
 	if n := len(root.Kids); n > 0 {
 		if t, ok := root.Kids[n-1].(string); ok && strings.TrimSpace(t) == "" {
@@ -400,7 +423,7 @@ func (s *Signer) Sign(root *Elem, refs []Ref) error {
 	sig := E("dsig:Signature")
 	root.Kids = append(root.Kids, "\n  ", sig, "\n")
 	si := E("dsig:SignedInfo",
-		E("dsig:CanonicalizationMethod").Attr("Algorithm", C14NWithCmt),
+		E("dsig:CanonicalizationMethod").Attr("Algorithm", p.C14N),
 		E("dsig:SignatureMethod").Attr("Algorithm", RSASHA256))
 	for _, r := range refs {
 		var data []byte
@@ -420,8 +443,15 @@ func (s *Signer) Sign(root *Elem, refs []Ref) error {
 				return err
 			}
 		}
-		d := sha256.Sum256(data)
-		ref.Add(E("dsig:DigestMethod").Attr("Algorithm", DigestSHA256), E("dsig:DigestValue", base64.StdEncoding.EncodeToString(d[:])))
+		var d []byte
+		if p.Digest == DigestSHA1 {
+			h := sha1.Sum(data)
+			d = h[:]
+		} else {
+			h := sha256.Sum256(data)
+			d = h[:]
+		}
+		ref.Add(E("dsig:DigestMethod").Attr("Algorithm", p.Digest), E("dsig:DigestValue", base64.StdEncoding.EncodeToString(d)))
 		si.Add(ref)
 	}
 	sv := E("dsig:SignatureValue")
