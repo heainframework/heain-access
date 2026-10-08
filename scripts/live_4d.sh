@@ -6,6 +6,8 @@
 #  - enrolment keeps templates only, sealed under a per-subject key from core's KMS;
 #  - face / fingerprint / ID-card decisions each file a signed reasoning record with a model hash;
 #  - ID-card registry and keycard ACL are datasets in heain-database (uses[] db.dataset.lookup);
+#  - Stage B-3a: keycard swipes get an advisory anomaly score (Isolation Forest over the card's own
+#    history); a flagged swipe goes to an Approver (P5 access.keycard_review) and the ACL still decides;
 #  - grants need a fresh, single-use verification and are signed; check / revoke;
 #  - removing a subject destroys its key (crypto-shred); retention ends templates; data survives
 #    a restart; calls outside the identity lane are refused.
@@ -43,8 +45,11 @@ runapp() { # <instance> <manifest> <port> <state> <binary> [args...]
 pending() { as approver-1 $URL/v1/admin/policy/pending | j "' '.join(x['ID'] for x in d['actions'] if x['Type']=='$1')"; }
 until_ok() { for i in $(seq 1 ${2:-20}); do eval "$1" && return 0; sleep 1; done; return 1; }
 audit() { as admin "$URL/v1/admin/audit?limit=1000&from=${1:-1}"; }
-allaudit() { local f=1 out="[]"; while :; do p=$(audit $f); n=$(echo "$p" | j "len(d['records'])"); [ "${n:-0}" = 0 ] && break
-  out=$(python3 -c "import json,sys;a=json.loads(sys.argv[1]);b=json.loads(sys.argv[2])['records'];print(json.dumps(a+b))" "$out" "$p"); f=$((f+n)); [ "$n" -lt 1000 ] && break; done; echo "{\"records\":$out}"; }
+allaudit() { # every record, a page of 1000 at a time, through files (a whole chain is too long for an argument)
+  local f=1 n; : > "$W/audit.jsonl"
+  while :; do audit $f > "$W/audit.page"; n=$(j "len(d['records'])" < "$W/audit.page")
+    [ "${n:-0}" -gt 0 ] || break; cat "$W/audit.page" >> "$W/audit.jsonl"; echo >> "$W/audit.jsonl"; [ "$n" -lt 1000 ] && break; f=$((f+1000)); done
+  python3 -c "import json,sys;r=[];[r.extend(json.loads(l)['records']) for l in open(sys.argv[1]) if l.strip()];print(json.dumps({'records':r}))" "$W/audit.jsonl"; }
 
 echo "== 0. core node G; build heain-access and heain-database"
 $H clean >/dev/null; $H build >/dev/null || { echo "core build failed"; exit 1; }; $H certs >/dev/null
@@ -108,6 +113,30 @@ kc() { idl -X POST -d "{\"uid\":\"$1\"}" $AURL/v1/verify/keycard | j "d['allow']
 [ "$(kc card-0042)" = True ] && [ "$(kc card-0666)" = False ] && [ "$(kc card-9999)" = False ] && ok "keycards checked against the ACL in heain-database (allowed / revoked / unknown)" || bad "keycards"
 [ "$(allaudit | j "sum(1 for x in d['records'] if x['event']['Action']=='app.event' and x['event']['Actor'].startswith('heain-database.') and x['event']['Detail'].get('app_actor','').startswith('heain-access.') and x['event']['Detail'].get('capability')=='db.dataset.lookup')")" -ge 5 ] \
   && ok "heain-database audited each lookup as a call from heain-access (uses[] db.dataset.lookup)" || bad "lookup audit"
+
+echo "== 3b. keycard anomaly signal (B-3a): three weeks of history, then a usual and an unusual swipe"
+cl -o /dev/null -X POST -d "{\"scope_key\":\"default\",\"records\":[$(for c in 1 2 3 4 5 6; do printf '{"record_key":"kc-0%d","value":{"allowed":true}},' $c; done | sed 's/,$//')]}" $DURL/v1/datasets/keycards/import
+swipe() { idl -X POST -d "{\"uid\":\"$1\",\"reader\":\"$2\",\"at\":\"$3\"}" $AURL/v1/verify/keycard; }
+MON=$(date -u -d "last monday -21 days" +%Y-%m-%d)
+for d in $(seq 0 18); do
+  day=$(date -u -d "$MON +$d days" +%Y-%m-%d); [ "$(date -u -d "$day" +%u)" -ge 6 ] && continue
+  for c in 1 2 3 4 5 6; do
+    swipe kc-0$c lobby "${day}T08:$(printf %02d $(( (c*7+d*3) % 50 + 5 )))":00Z >/dev/null
+    swipe kc-0$c garage "${day}T17:$(printf %02d $(( (c*5+d) % 30 + 20 )))":00Z >/dev/null
+  done
+done
+R0=$(allaudit | j "sum(1 for x in d['records'] if x['event']['Action']=='ai.reasoning_record' and x['event']['Detail']['record']['capability']['name']=='identity.verify.keycard' and x['event']['Detail']['record']['model']['name']=='keycard-iforest')")
+[ "${R0:-0}" -ge 150 ] && ok "$R0 swipes of 6 cards over three weeks, each with a signed reasoning record (model keycard-iforest)" || bad "history records: $R0"
+U=$(swipe kc-01 lobby "$(date -u -d "$MON +21 days" +%Y-%m-%d)T08:41:00Z")
+O=$(swipe kc-01 server-room "$(date -u -d "$MON +20 days" +%Y-%m-%d)T03:10:00Z")
+[ "$(echo "$U" | j "d['allow'], d['anomaly']['status'], d['anomaly']['flagged']")" = "True scored False" ] && [ "$(echo "$O" | j "d['allow'], d['anomaly']['flagged']")" = "True True" ] \
+  && ok "a usual morning swipe scores $(echo "$U" | j "d['anomaly']['score']") (not flagged); the server room at 03:10 on a Sunday scores $(echo "$O" | j "d['anomaly']['score']") -- flagged, yet still allowed: the ACL decides" || bad "anomaly: usual $U unusual $O"
+RA=$(echo "$O" | j "d['review_action_id']")
+[ -n "$RA" ] && [ "$(as approver-1 $URL/v1/admin/policy/pending | j "[a['Type'] for a in d['actions'] if a['ID']=='$RA'][0]")" = access.keycard_review ] \
+  && ok "the flagged swipe went to an Approver (P5 access.keycard_review); heain-access acts on nothing itself" || bad "review: $RA"
+X=$(swipe kc-99 server-room "$(date -u -d "$MON +20 days" +%Y-%m-%d)T03:12:00Z")
+[ "$(echo "$X" | j "d['allow'], d['anomaly']['status']")" = "False insufficient_history" ] && ok "a card not on the ACL is denied whatever the model says (no history: not scored)" || bad "gate: $X"
+! grep -rqaF -e kc-01 -e server-room "$W/state-a1" && ok "swipe history sealed: no card id or reader in heain-access's files" || bad "keycard plaintext at rest"
 
 echo "== 4. grants: fresh single-use verification, signed, check, revoke"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ); LATER=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)

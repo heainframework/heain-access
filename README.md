@@ -41,3 +41,14 @@ may follow the leaf); signed with XML Signature (RSA-SHA256) by `-dcp-key-issuer
 Only the apps in `-dcp-key-callers` (default `heain-mastering`) may ask: the plugin signs whatever keys it is given, and
 heain-mastering asks only after an Approver has approved the request through P5. `internal/xmldsig` is the shared
 canonical-XML writer and signer (the same file is in heain-mastering).
+
+## Stage B-3a: the keycard anomaly signal (2.2, 2026-10-08)
+
+The author decided (2026-10-08) to build the keycard anomaly model in Go. This closes "the keycard anomaly model" in "Not yet" above; a live run with the real models on fresh test images is still to come.
+
+- **The ACL decides, as before.** A card not on it is denied, and the model never changes the decision.
+- **Each swipe** (`POST /v1/verify/keycard` `{"uid","reader"?,"at"?}`) is described against that card's earlier swipes: hours from any earlier time of day, how new the weekday and the reader are for the card, the gap since its last swipe, swipes in the last ten minutes, denials in the last day.
+- **An Isolation Forest** fitted on the recent swipes of every card scores it. The forest needs 50 swipes in all, a card 10 (`-keycard-min-history`); before that the answer is `insufficient_history`.
+- **At `-keycard-anomaly-threshold` (0.65) or above** the swipe is flagged and goes to an Approver as P5 `access.keycard_review` (THRESHOLD_BASED). It is still allowed when the card is on the ACL. The answer carries `anomaly` (status, score, features, history) and `review_action_id`.
+- **Every keycard decision** files a signed reasoning record (model `keycard-iforest`, role advisory). The input is the card's HMAC, never its id.
+- **History:** swipes are kept sealed per card under an HMAC of its id, for at most `-keycard-history-retention` (90 days; data class `keycard_history`). A reader that uploads its log late sends each swipe's own time as `at`.

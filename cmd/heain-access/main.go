@@ -26,6 +26,7 @@ import (
 	"github.com/heainframework/heain-access/internal/api"
 	"github.com/heainframework/heain-access/internal/biometric"
 	"github.com/heainframework/heain-access/internal/grants"
+	"github.com/heainframework/heain-access/internal/keycard"
 	"github.com/heainframework/heain-access/internal/plugins/dcpkey"
 	"github.com/heainframework/heain-access/internal/sidecar"
 )
@@ -40,6 +41,9 @@ func main() {
 	retention := flag.Duration("retention", 30*24*time.Hour, "how long an enrolled template is kept (at most 720h, the manifest's retention max)")
 	aclDS := flag.String("keycard-acl-dataset", "keycards", "heain-database dataset holding allowed keycard UIDs")
 	aclScope := flag.String("keycard-acl-scope", "default", "its scope_key")
+	kcThr := flag.Float64("keycard-anomaly-threshold", 0.65, "keycard anomaly score at or above which a swipe is flagged for an Approver (advisory: the ACL decides)")
+	kcMin := flag.Int("keycard-min-history", 10, "swipes a card needs before its swipes are scored")
+	kcRet := flag.Duration("keycard-history-retention", 90*24*time.Hour, "how long keycard swipe history is kept (at most 2160h, the manifest's retention max)")
 	dcpCA := flag.String("dcp-key-ca-file", "", "dcp-key plugin: trusted root(s) for target playback-device certificates (plugin off when empty)")
 	dcpCert := flag.String("dcp-key-issuer-cert-file", "", "dcp-key plugin: issuer certificate chain, leaf first (the KDM signer)")
 	dcpCallers := flag.String("dcp-key-callers", "heain-mastering", "dcp-key plugin: comma-separated apps allowed to ask for KDMs")
@@ -76,6 +80,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer bio.Close()
+	if *kcRet > 90*24*time.Hour {
+		log.Fatal("heain-access: -keycard-history-retention is at most 2160h")
+	}
+	kc, err := keycard.Open(filepath.Join(state, "keycards.db"), inside, ik, keycard.Params{Threshold: *kcThr, MinCardHistory: *kcMin, Retention: *kcRet})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer kc.Close()
 	gs, err := grants.Open(filepath.Join(state, "grants.db"), inside, app)
 	if err != nil {
 		log.Fatal(err)
@@ -94,7 +106,7 @@ func main() {
 		log.Printf("heain-access: WARNING -test-stub-sidecars: model-free stand-ins, TEST ONLY")
 	}
 	a := &api.API{App: app, Side: side, Bio: bio, Grants: gs, Runtime: runtime, FaceThreshold: *faceThr, FingerThreshold: *fpThr,
-		Retention: *retention, ACLDataset: *aclDS, ACLScope: *aclScope}
+		Retention: *retention, ACLDataset: *aclDS, ACLScope: *aclScope, Keycards: kc}
 	if *dcpCA != "" {
 		caPEM, err1 := os.ReadFile(*dcpCA)
 		certPEM, err2 := os.ReadFile(*dcpCert)

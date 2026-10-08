@@ -2,10 +2,13 @@
 # Templates only (never images), sealed per subject under keys held by core's KMS, retention
 # at most 30 days; registries and keycard ACLs come from heain-database; AI models are local
 # sidecars; every AI decision has a signed reasoning record. dcp-key is an optional plugin.
+# 2.2 (Stage B-3a, 2026-10-08): the keycard anomaly signal -- the ACL stays the gate; an Isolation Forest
+# scores each swipe against the card's own history (advisory: a flagged swipe goes to an Approver as
+# P5 access.keycard_review); swipe history sealed per card, at most 90 days.
 manifest_version: 1
 app:
   id: heain-access
-  version: 2.1.0
+  version: 2.2.0
   group: base
   description: Identity verification (face, fingerprint, ID card, keycard) and signed access grants.
   api: v1
@@ -46,7 +49,13 @@ capabilities:
     execution: direct
     lane: identity
     ai: {used: true, model: {name: easyocr-th-en, version: "1.7"}, reasoning_record: required}
-  - {name: identity.verify.keycard, version: 1, formal: true, execution: direct, lane: identity, ai: {used: false}}
+  - name: identity.verify.keycard
+    version: 1
+    formal: true
+    execution: direct
+    lane: identity
+    ai: {used: true, model: {name: keycard-iforest, version: "1"}, reasoning_record: required}
+    data_classes: [keycard_history]
   - {name: access.grant.issue, version: 1, formal: true, execution: direct, ai: {used: false}, data_classes: [access_grant]}
   - {name: access.grant.check, version: 1, formal: true, execution: direct, ai: {used: false}, data_classes: [access_grant]}
   - {name: access.grant.revoke, version: 1, formal: true, execution: direct, ai: {used: false}, data_classes: [access_grant]}
@@ -69,6 +78,7 @@ uses:
 data_classes:
   - {name: biometric_template, sovereignty: node-local, retention: {max: 30d}, raw_storage: forbidden, crypto_shred: true, trust: trusted, encrypted_at_rest: true}
   - {name: access_grant, sovereignty: node-local, encrypted_at_rest: true}
+  - {name: keycard_history, sovereignty: node-local, retention: {max: 90d}, crypto_shred: true, encrypted_at_rest: true}
 offline:
   allowed: [identity.enroll.face, identity.enroll.fingerprint, identity.subject.remove, identity.verify.face, identity.verify.fingerprint,
             identity.verify.idcard, identity.verify.keycard, access.grant.issue, access.grant.check, access.grant.revoke]

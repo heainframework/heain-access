@@ -26,6 +26,7 @@ import (
 
 	"github.com/heainframework/heain-access/internal/biometric"
 	"github.com/heainframework/heain-access/internal/grants"
+	"github.com/heainframework/heain-access/internal/keycard"
 	"github.com/heainframework/heain-access/internal/plugins/dcpkey"
 	"github.com/heainframework/heain-access/internal/sidecar"
 )
@@ -47,6 +48,7 @@ type API struct {
 	Retention       time.Duration // template retention (<= 30 days)
 	ACLDataset      string        // default keycard ACL dataset in heain-database
 	ACLScope        string
+	Keycards        *keycard.Store // the keycard anomaly signal (Stage B-3a)
 
 	mu    sync.Mutex
 	verif map[string]verification
@@ -232,6 +234,10 @@ type verifyOut struct {
 	Confidence     float64 `json:"confidence"`
 	Reason         string  `json:"reason,omitempty"`
 	VerificationID string  `json:"verification_id,omitempty"`
+	// keycards (Stage B-3a): the advisory anomaly signal, and the P5
+	// review raised when it flags the swipe
+	Anomaly        *keycard.Result `json:"anomaly,omitempty"`
+	ReviewActionID string          `json:"review_action_id,omitempty"`
 }
 
 func cosine(a, b []float64) float64 {
@@ -409,8 +415,10 @@ func (a *API) verifyIDCard(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) verifyKeycard(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		UID string       `json:"uid"`
-		ACL *registryRef `json:"acl,omitempty"`
+		UID    string       `json:"uid"`
+		ACL    *registryRef `json:"acl,omitempty"`
+		Reader string       `json:"reader,omitempty"` // the door or reader (default "default")
+		At     *time.Time   `json:"at,omitempty"`     // when the card was read (a reader may upload its log late); default now
 	}
 	if !decode(w, r, &b) {
 		return
@@ -418,6 +426,18 @@ func (a *API) verifyKeycard(w http.ResponseWriter, r *http.Request) {
 	if b.UID == "" {
 		fail(w, http.StatusBadRequest, "bad_request", "uid is required")
 		return
+	}
+	now := time.Now().UTC()
+	at := now
+	if b.At != nil {
+		if b.At.After(now.Add(5 * time.Minute)) {
+			fail(w, http.StatusBadRequest, "bad_request", "at is in the future")
+			return
+		}
+		at = b.At.UTC()
+	}
+	if b.Reader == "" {
+		b.Reader = "default"
 	}
 	ref := registryRef{Dataset: a.ACLDataset, ScopeKey: a.ACLScope}
 	if b.ACL != nil {
@@ -431,14 +451,70 @@ func (a *API) verifyKeycard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// the ACL is the gate: the model below never changes this decision
 	out := verifyOut{Allow: found && val["allowed"] != false, Confidence: 1}
 	if !out.Allow {
 		out.Confidence, out.Reason = 0, "keycard not on the ACL"
+	}
+	if a.Keycards != nil {
+		res, err := a.Keycards.Score(b.UID, b.Reader, at)
+		if err == nil {
+			err = a.Keycards.Record(b.UID, keycard.Swipe{At: at, Reader: b.Reader, Allowed: out.Allow})
+		}
+		if err == nil {
+			out.Anomaly = &res
+			err = a.keycardRecord(r.Context(), b.UID, b.Reader, at, out.Allow, res, &out)
+		}
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
 	}
 	if out.Allow {
 		out.VerificationID = a.newVerification(b.UID, "keycard")
 	}
 	reply(w, http.StatusOK, out)
+}
+
+// keycardRecord files the swipe's signed reasoning record and, when the
+// model flags it, asks an Approver to review it (P5, advisory).
+func (a *API) keycardRecord(ctx context.Context, uid, reader string, at time.Time, allow bool, res keycard.Result, out *verifyOut) error {
+	card := a.Keycards.Card(uid)
+	gate := "deny (not on the ACL)"
+	if allow {
+		gate = "allow (on the ACL)"
+	}
+	decision := gate + "; anomaly not scored: too little history"
+	if res.Status == "scored" {
+		decision = fmt.Sprintf("%s; anomaly score %.3f (%s)", gate, res.Score, map[bool]string{true: "flagged for review", false: "usual"}[res.Flagged])
+	}
+	var factors []heain.Factor
+	for _, n := range keycard.FeatureNames {
+		factors = append(factors, heain.Factor{Name: n, Value: res.Features[n]})
+	}
+	factors = append(factors, heain.Factor{Name: "card_history", Value: res.History}, heain.Factor{Name: "fitted_swipes", Value: res.Fitted})
+	conf := 1.0
+	if res.Status == "scored" {
+		conf = 1 - res.Score
+	}
+	if _, err := a.App.Reason(ctx, heain.Decision{Capability: "identity.verify.keycard", Input: []byte(card + "|" + reader + "|" + at.Format(time.RFC3339Nano)),
+		InputDataClass: "keycard_history", InputRef: "keycard:" + card[:16], Decision: decision,
+		Value:     map[string]any{"allow": allow, "anomaly": res.Status, "score": res.Score, "flagged": res.Flagged},
+		Threshold: &heain.Threshold{Name: "anomaly_score", Value: res.Threshold, Source: "app"}, Confidence: &conf,
+		Summary: "The ACL decides; an Isolation Forest over the card's own history (time of day, weekday, reader, gap, burst, recent denials) scores how unusual the swipe is, advisory only.",
+		Factors: factors, Role: "advisory", ModelSHA256: a.Keycards.ModelSHA256(), Runtime: "heain-access keycard iforest (go)"}); err != nil {
+		return err
+	}
+	if !res.Flagged {
+		return nil
+	}
+	pr, err := a.App.Propose(ctx, heain.Proposal{Type: "access.keycard_review", Category: heain.CategoryThreshold, Value: res.Score,
+		Data: map[string]any{"card": card[:16], "reader": reader, "at": at, "allowed": allow, "score": res.Score, "features": res.Features}})
+	if err != nil {
+		return err
+	}
+	out.ReviewActionID = pr.ActionID
+	return nil
 }
 
 // ---- grants
